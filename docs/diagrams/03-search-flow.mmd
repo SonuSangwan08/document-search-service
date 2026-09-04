@@ -1,0 +1,19 @@
+sequenceDiagram
+    participant C as Client
+    participant DS as document-service
+    participant Rd as Redis
+    participant E as Elasticsearch
+
+    C->>DS: POST /auth/login
+    DS-->>C: 200 OK { token, tenantId: acme, role }
+    C->>DS: GET /search?q=...  (Authorization: Bearer token)
+    DS->>Rd: GET search:{sha256(tenant+query+filters)}
+    alt cache hit
+        Rd-->>DS: cached SearchResponse JSON
+        DS-->>C: 200 OK (fromCache=true)
+    else cache miss
+        DS->>E: search(index=documents, routing=acme, filter tenantId=acme)
+        E-->>DS: hits + highlights + facets
+        DS->>Rd: SETEX search:{hash} 30s
+        DS-->>C: 200 OK (fromCache=false)
+    end

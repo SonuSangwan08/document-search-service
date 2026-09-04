@@ -1,0 +1,24 @@
+sequenceDiagram
+    participant C as Client
+    participant DS as document-service
+    participant P as Postgres
+    participant R as Outbox Relay
+    participant K as Kafka
+    participant DI as document-indexer
+    participant E as Elasticsearch
+
+    C->>DS: POST /auth/login
+    DS-->>C: 200 OK { token, tenantId, role }
+    C->>DS: POST /documents (Authorization: Bearer token)
+    DS->>P: INSERT documents (status=PENDING)<br/>INSERT document_outbox   [one TX]
+    P-->>DS: committed
+    DS-->>C: 202 Accepted {id, status: PENDING}
+    loop every 200ms
+        R->>P: SELECT ... FROM document_outbox LIMIT 100
+        R->>K: publish DocumentEvent(key=documentId)
+        R->>P: DELETE relayed rows
+    end
+    K->>DI: DocumentEvent(INDEX)
+    DI->>P: re-read current document row
+    DI->>E: index (routing = tenantId)
+    DI->>P: UPDATE status=INDEXED

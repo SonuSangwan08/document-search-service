@@ -1,0 +1,43 @@
+# Minimal illustration of a blue-green traffic flip in front of two identical app
+# deployments. In practice this role is usually played by a Kubernetes Service selector
+# swap, a load balancer target-group swap, or a service-mesh traffic split (e.g. Istio
+# VirtualService weights) rather than a hand-edited nginx.conf - this file exists to make
+# the *mechanism* concrete for the write-up, not as a production deployment tool.
+#
+# Cutover procedure:
+#   1. `green` is deployed and warmed up (readiness probe passing, smoke-tested).
+#   2. Flip `set $active_pool` below from "blue" to "green" and reload nginx
+#      (`nginx -s reload` - zero dropped connections, existing keep-alives finish on
+#      the old upstream).
+#   3. Watch error-rate/latency dashboards for a few minutes.
+#   4. If healthy: decommission `blue`. If not: flip back to "blue" - instant rollback,
+#      no redeploy needed.
+
+upstream blue {
+    server app-blue:8080;
+}
+
+upstream green {
+    server app-green:8080;
+}
+
+map $active_pool $upstream_pool {
+    blue  blue;
+    green green;
+}
+
+server {
+    listen 80;
+
+    set $active_pool "blue"; # <-- flip this and reload to cut traffic over
+
+    location / {
+        proxy_pass http://$upstream_pool;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location /actuator/health {
+        proxy_pass http://$upstream_pool;
+    }
+}

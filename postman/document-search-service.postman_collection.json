@@ -1,0 +1,374 @@
+{
+  "info": {
+    "name": "Document Search Service",
+    "description": "Sample requests for the Distributed Document Search Service prototype. Set {{baseUrl}} (default http://localhost:8080). Auth is via POST /auth/login - run the two Login requests first (they capture {{adminToken}}/{{userToken}} into collection variables), then every other request sends `Authorization: Bearer <token>`. tenantId and role are no longer request headers - they're verified claims inside the JWT, resolved at login time from the account you authenticate as. Each request carries a pm.test() assertion so a `newman run` gives real pass/fail signal, not just \"the request didn't error\".",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080" },
+    { "key": "managementUrl", "value": "http://localhost:8081" },
+    { "key": "adminToken", "value": "" },
+    { "key": "userToken", "value": "" },
+    { "key": "documentId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('reports UP', () => pm.expect(pm.response.json().status).to.eql('UP'));",
+              "pm.test('shows per-dependency detail', () => {",
+              "  const components = pm.response.json().components;",
+              "  pm.expect(components).to.have.property('db');",
+              "  pm.expect(components).to.have.property('elasticsearch');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": "{{managementUrl}}/actuator/health"
+      }
+    },
+    {
+      "name": "Login (admin@acme)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('response carries a token and the ADMIN role claim', () => {",
+              "  pm.expect(body.token).to.be.a('string');",
+              "  pm.expect(body.role).to.eql('ADMIN');",
+              "  pm.expect(body.tenantId).to.eql('acme');",
+              "});",
+              "pm.collectionVariables.set('adminToken', body.token);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/auth/login",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"username\": \"admin@acme\",\n  \"password\": \"password123\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Login (user@acme)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('response carries a token and the USER role claim', () => {",
+              "  pm.expect(body.token).to.be.a('string');",
+              "  pm.expect(body.role).to.eql('USER');",
+              "});",
+              "pm.collectionVariables.set('userToken', body.token);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/auth/login",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"username\": \"user@acme\",\n  \"password\": \"password123\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Login with wrong password (rejected)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('status is 401', () => pm.response.to.have.status(401));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/auth/login",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"username\": \"admin@acme\",\n  \"password\": \"wrong-password\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Create Document",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('status is 202 Accepted', () => pm.response.to.have.status(202));",
+              "const body = pm.response.json();",
+              "pm.test('status field is PENDING', () => pm.expect(body.status).to.eql('PENDING'));",
+              "pm.test('sizeBucket was server-derived', () => pm.expect(body.sizeBucket).to.eql('SMALL'));",
+              "if (pm.response.code === 202) {",
+              "  pm.collectionVariables.set('documentId', body.id);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{adminToken}}", "description": "ADMIN required for create/delete; USER is read-only" },
+          { "key": "Idempotency-Key", "value": "", "description": "Optional - a repeated key for this tenant returns the original document instead of creating a duplicate" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{baseUrl}}/documents",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"title\": \"Q3 Board Deck\",\n  \"content\": \"Revenue grew 42 percent year over year, driven by search platform adoption.\",\n  \"tags\": [\"finance\", \"board\", \"q3\"],\n  \"metadata\": { \"author\": \"cfo@acme.com\" },\n  \"department\": \"finance\",\n  \"category\": \"board-deck\",\n  \"docType\": \"presentation\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Get Document",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('returns the document just created', () => {",
+              "  pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('documentId'));",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{userToken}}" }
+        ],
+        "url": "{{baseUrl}}/documents/{{documentId}}"
+      }
+    },
+    {
+      "name": "Search",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('hits is an array', () => pm.expect(body.hits).to.be.an('array'));",
+              "pm.test('fromCache flag is present', () => pm.expect(body).to.have.property('fromCache'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{userToken}}" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/search?q=revenue&fuzzy=true&page=0&size=10",
+          "host": ["{{baseUrl}}"],
+          "path": ["search"],
+          "query": [
+            { "key": "q", "value": "revenue" },
+            { "key": "fuzzy", "value": "true" },
+            { "key": "page", "value": "0" },
+            { "key": "size", "value": "10" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Search - Facets (tag, department, category, docType)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('facets object includes department', () => {",
+              "  pm.expect(pm.response.json().facets).to.have.property('department');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{userToken}}" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/search?q=&tags=finance&department=finance",
+          "host": ["{{baseUrl}}"],
+          "path": ["search"],
+          "query": [
+            { "key": "q", "value": "" },
+            { "key": "tags", "value": "finance" },
+            { "key": "department", "value": "finance" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Delete Document",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('status is 204 No Content', () => pm.response.to.have.status(204));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "DELETE",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{adminToken}}" }
+        ],
+        "url": "{{baseUrl}}/documents/{{documentId}}"
+      }
+    },
+    {
+      "name": "Deleted document is gone (404)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('status is 404 after delete', () => pm.response.to.have.status(404));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{userToken}}" }
+        ],
+        "url": "{{baseUrl}}/documents/{{documentId}}"
+      }
+    },
+    {
+      "name": "Invalid token is rejected (401)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('garbage token is rejected with 401', () => pm.response.to.have.status(401));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer not-a-real-token" }
+        ],
+        "url": "{{baseUrl}}/search?q=revenue"
+      }
+    },
+    {
+      "name": "USER role cannot create (rejected)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('read-only role is rejected with 403', () => pm.response.to.have.status(403));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{userToken}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{baseUrl}}/documents",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"title\": \"Should be rejected\",\n  \"content\": \"USER role is read-only.\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Missing Authorization header is rejected (401)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('missing token is rejected with 401', () => pm.response.to.have.status(401));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/documents/{{documentId}}"
+      }
+    },
+    {
+      "name": "Idempotent create returns same document",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('status is 202', () => pm.response.to.have.status(202));",
+              "const body = pm.response.json();",
+              "const first = pm.collectionVariables.get('idempotentFirstId');",
+              "if (!first) {",
+              "  pm.collectionVariables.set('idempotentFirstId', body.id);",
+              "  pm.test('first call recorded an id', () => pm.expect(body.id).to.be.a('string'));",
+              "} else {",
+              "  pm.test('replay returns the same id, not a new document', () => pm.expect(body.id).to.eql(first));",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{adminToken}}" },
+          { "key": "Idempotency-Key", "value": "postman-demo-key-1" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{baseUrl}}/documents",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"title\": \"Idempotency Demo\",\n  \"content\": \"Run this request twice in a row - the second run returns the same document id.\"\n}"
+        }
+      }
+    }
+  ]
+}

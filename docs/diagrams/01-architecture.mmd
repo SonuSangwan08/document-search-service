@@ -1,0 +1,47 @@
+flowchart TB
+    client[Client]
+
+    subgraph DS["document-service  —  N replicas, horizontally scaled"]
+        direction TB
+        login["POST /auth/login"]
+        jwtf["JwtAuthFilter +
+RateLimitInterceptor"]
+        ctrl["DocumentController /
+SearchController"]
+        login --> jwtf --> ctrl
+    end
+
+    client -->|"1: login"| login
+    client -->|"2: Bearer JWT"| ctrl
+
+    ctrl -->|"write doc + outbox, 1 TX"| pg[("PostgreSQL
+system of record")]
+    ctrl -->|"cache"| redis[("Redis
+cache + rate limits")]
+    ctrl -->|"routed search"| es[("Elasticsearch
+search index")]
+
+    relay["Outbox Relay
+poll 200ms"]
+    relay --> pg
+    relay -->|publish| kafka[("Kafka
+document-index-events")]
+
+    subgraph DI["document-indexer  —  N replicas, independently scaled"]
+        direction TB
+        consumer[DocumentIndexConsumer]
+    end
+
+    kafka --> consumer
+    consumer -->|"index / delete"| es
+    consumer -->|"update status"| pg
+
+    idp["External IdP / JWKS
+production only"]
+    vault["Vault / Secrets Manager
+production only"]
+    idp -.->|"replaces self-issued JWT"| login
+    vault -.->|"injects secrets"| DS
+
+    style idp stroke-dasharray: 5 5,fill:#f5f5f5,stroke:#999,color:#666
+    style vault stroke-dasharray: 5 5,fill:#f5f5f5,stroke:#999,color:#666

@@ -1,0 +1,79 @@
+spring:
+  application:
+    name: document-indexer
+
+  # Same database and `documents` table as document-service, but this
+  # service never migrates it (ddl-auto: none, no Flyway dependency at all) -
+  # it assumes document-service's Flyway migrations have already run. See
+  # docker-compose.yml for the startup-ordering dependency this implies.
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:docsearch}
+    username: ${DB_USER:docsearch}
+    password: ${DB_PASSWORD:docsearch}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+      minimum-idle: 2
+      connection-timeout: 3000
+
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: document-indexer
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      auto-offset-reset: earliest
+      properties:
+        spring.json.trusted.packages: com.docsearch.messaging
+        spring.json.use.type.headers: false
+        spring.json.value.default.type: com.docsearch.messaging.DocumentEvent
+        max.poll.records: 50
+    listener:
+      ack-mode: manual
+      concurrency: 3
+
+app:
+  elasticsearch:
+    uris: ${ES_URIS:http://localhost:9200}
+    index-name: ${ES_INDEX:documents}
+    connect-timeout-ms: 2000
+    socket-timeout-ms: 5000
+  kafka:
+    document-events-topic: ${KAFKA_DOCUMENT_TOPIC:document-index-events}
+
+# No public REST API, so unlike document-service there's no tenant-facing
+# traffic to keep actuator off of - a single port is fine here.
+server:
+  port: ${SERVER_PORT:8082}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      # See document-service's application.yml for why this is "always" and
+      # not "when-authorized" (no Spring Security here means the latter
+      # hides details from everyone, silently failing the assignment's
+      # explicit "dependency status" requirement).
+      show-details: always
+      probes:
+        enabled: true
+  health:
+    readinessstate:
+      enabled: true
+    livenessstate:
+      enabled: true
+
+logging:
+  level:
+    root: INFO
+    com.docsearch: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [tenant=%X{tenantId}] %logger{36} - %msg%n"

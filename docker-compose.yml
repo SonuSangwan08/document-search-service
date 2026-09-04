@@ -1,0 +1,152 @@
+name: document-search-service
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: docsearch
+      POSTGRES_USER: docsearch
+      POSTGRES_PASSWORD: docsearch
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docsearch -d docsearch"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.18.3
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  # Single-broker Kafka in KRaft mode (no ZooKeeper) - enough to demonstrate
+  # the outbox -> Kafka -> consumer pipeline. Production would run a
+  # multi-broker cluster (or a managed service); see docs/PRODUCTION_READINESS.md.
+  kafka:
+    image: apache/kafka:3.8.0
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+
+  # The REST API: document CRUD + search, tenant/role enforcement, rate
+  # limiting, caching, and the outbox (write side of async indexing).
+  document-service:
+    build:
+      context: ./document-service
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: docsearch
+      DB_USER: docsearch
+      DB_PASSWORD: docsearch
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      ES_URIS: http://elasticsearch:9200
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      # Actuator (health/metrics/prometheus) lives on its own port, separate
+      # from the public API port - see application.yml management.server.port.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/actuator/health/liveness || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  # The Kafka consumer: indexes/deletes documents in Elasticsearch and writes
+  # status back to Postgres. Independently scalable from document-service -
+  # `docker compose up --scale document-indexer=3` adds consumer parallelism
+  # (bounded by the document-index-events topic's partition count) without
+  # spinning up more copies of the REST API. Owns no schema (relies on
+  # document-service's Flyway migrations), so it waits on document-service
+  # being healthy - not just Postgres - before starting.
+  document-indexer:
+    build:
+      context: ./document-indexer
+      dockerfile: Dockerfile
+    # No host port mapping, deliberately - confirmed live that a fixed
+    # "8082:8082" mapping here made `--scale document-indexer=3` fail
+    # outright (two containers can't both bind the same host port), directly
+    # breaking the horizontal-scaling story this service exists to enable.
+    # The healthcheck below still works without one - it runs `wget` inside
+    # the container's own network namespace, not from the host. Actuator is
+    # reachable from other containers on the compose network at
+    # `document-indexer:8082` if ever needed for debugging.
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: docsearch
+      DB_USER: docsearch
+      DB_PASSWORD: docsearch
+      ES_URIS: http://elasticsearch:9200
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      document-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8082/actuator/health/liveness || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+volumes:
+  pgdata:
+  esdata:
